@@ -51,34 +51,6 @@ jobs:
         path: dist/
         retention-days: 30
 
-  publish-test-pypi:
-    name: Publish to Test PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_test_pypi == 'true') ||
-      github.event_name == 'release'
-    
-    environment:
-      name: test-pypi
-      url: https://test.pypi.org/p/auto-uv
-    
-    permissions:
-      id-token: write
-    
-    steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: python-package-distributions
-        path: dist/
-    
-    - name: Publish to Test PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://test.pypi.org/legacy/
-        skip-existing: true
-
   publish-pypi:
     name: Publish to PyPI
     needs: build
