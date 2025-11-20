@@ -1,5 +1,9 @@
 # auto-uv
 
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
 Automatically use `uv run` when executing Python scripts. Just type `python script.py` instead of `uv run script.py`!
 
 ## What is This?
@@ -39,7 +43,7 @@ If all conditions are met, it re-executes your script with `uv run`, giving you 
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - `uv` installed and in your PATH
 
 Install uv:

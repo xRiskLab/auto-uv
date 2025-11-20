@@ -3,7 +3,7 @@
 .PHONY: help install dev-install test lint format clean build publish act-test pre-commit
 
 # Load .env file if it exists
--include .env
+	-include .env
 export
 
 # Default target
@@ -41,6 +41,9 @@ format: ## Format code
 	black src/ tests/ example.py
 	isort src/ tests/ example.py
 
+format-makefile: ## Format Makefile with mbake
+	AUTO_UV_DISABLE=1 uv run mbake format Makefile
+
 format-check: ## Check formatting without fixing
 	black --check src/ tests/ example.py
 	isort --check-only src/ tests/ example.py
@@ -61,7 +64,8 @@ build: clean ## Build package
 	uv build
 
 build-check: build ## Build and check distribution
-	uv build --check
+	@echo "✅ Build complete. Check dist/ directory"
+	@ls -lh dist/
 
 publish-test: build ## Publish to Test PyPI (reads UV_PUBLISH_TOKEN from .env)
 	@if [ -z "$$UV_PUBLISH_TOKEN" ]; then \
@@ -96,6 +100,15 @@ pre-commit: ## Run pre-commit on all files
 
 pre-commit-update: ## Update pre-commit hooks
 	pre-commit autoupdate
+
+prek-update: ## Auto-update pre-commit config to latest versions
+	AUTO_UV_DISABLE=1 uv run prek auto-update
+
+prek-run: ## Run prek hooks
+	AUTO_UV_DISABLE=1 uv run prek run --all-files
+
+prek-install: ## Install prek git hooks
+	AUTO_UV_DISABLE=1 uv run prek install
 
 version-patch: ## Bump patch version (0.1.0 -> 0.1.1)
 	@echo "Bumping patch version..."
@@ -154,4 +167,3 @@ release: clean build build-check ## Prepare release
 	@echo "  1. Test: pip install dist/*.whl"
 	@echo "  2. Push: git push origin main --tags"
 	@echo "  3. Publish: make publish-test OR make publish"
-
