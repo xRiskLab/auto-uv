@@ -10,11 +10,6 @@ on:
         required: true
         type: boolean
         default: false
-      publish_to_test_pypi:
-        description: 'Publish to Test PyPI'
-        required: true
-        type: boolean
-        default: true
 
 jobs:
   build:
