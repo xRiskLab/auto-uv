@@ -1,0 +1,107 @@
+[project]
+name = "auto-uv"
+version = "0.1.0"
+description = "Automatically use 'uv run' when executing Python scripts"
+keywords = ['uv', 'package manager', 'automation', 'python', 'development']
+authors = [
+    { name = "xRiskLab", email = "contact@xrisklab.ai" }
+]
+maintainers = [{ name = "xRiskLab", email = "contact@xrisklab.ai" }]
+dependencies = []
+readme = "README.md"
+requires-python = ">= 3.9"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0.0",
+    "hatch-autorun>=1.0.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=24.0.0",
+    "isort>=5.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "bandit>=1.7.0",
+    "pre-commit>=3.0.0",
+    "twine>=4.0.0",
+    "bump2version>=1.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/xRiskLab/auto-uv"
+Issues = "https://github.com/xRiskLab/auto-uv/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.hooks.autorun]
+dependencies = ["hatch-autorun"]
+code = "__import__('auto_uv').auto_use_uv()"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auto_uv.py"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+include = ["*.py", "*.pyi", "**/pyproject.toml"]
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 100
+
+[tool.black]
+line-length = 88
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+strict_optional = false
+
+[tool.bandit]
+exclude_dirs = ["tests", "build", "dist"]
+skips = ["B101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--verbose",
+    "--color=yes",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "**/__pycache__/*"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+
+[dependency-groups]
+dev = [
+    "mbake>=1.4.3",
+    "python-dotenv>=1.2.1",
+]

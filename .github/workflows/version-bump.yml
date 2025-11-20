@@ -1,0 +1,90 @@
+name: Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+
+jobs:
+  bump-version:
+    name: Bump version and create release
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install bump2version
+      run: pip install bump2version
+    
+    - name: Configure git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+    
+    - name: Get current version
+      id: current_version
+      run: |
+        CURRENT_VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+        echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        echo "Current version: $CURRENT_VERSION"
+    
+    - name: Bump version
+      id: bump
+      run: |
+        # Create bump2version config
+        cat > .bumpversion.cfg << EOF
+        [bumpversion]
+        current_version = ${{ steps.current_version.outputs.version }}
+        commit = True
+        tag = True
+        tag_name = v{new_version}
+        message = Bump version: {current_version} → {new_version}
+        
+        [bumpversion:file:pyproject.toml]
+        search = version = "{current_version}"
+        replace = version = "{new_version}"
+        EOF
+        
+        # Bump version
+        bump2version ${{ github.event.inputs.version_type }}
+        
+        # Get new version
+        NEW_VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "New version: $NEW_VERSION"
+    
+    - name: Push changes
+      run: |
+        git push origin main
+        git push origin v${{ steps.bump.outputs.new_version }}
+    
+    - name: Create GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create v${{ steps.bump.outputs.new_version }} \
+          --title "Release v${{ steps.bump.outputs.new_version }}" \
+          --generate-notes \
+          --draft
+
