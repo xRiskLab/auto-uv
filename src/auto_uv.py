@@ -34,12 +34,33 @@ def auto_use_uv():
     1. We're not already running under uv
     2. UV_RUN_ACTIVE environment variable is not set
     3. uv is available in the system
-    4. We're running a script (not interactive or -c command)
+    4. We're running a user script (not a package/tool script)
     
     If all conditions are met, it re-executes the script with 'uv run'.
+    
+    Note: This function intelligently skips interception for:
+    - Installed packages (site-packages, dist-packages)
+    - Virtual environment executables (bin/, Scripts/)
+    - Python installation scripts
+    This prevents interference with tools like dbt, pytest, pip, etc.
     """
     # Only intercept if running a script file
     if len(sys.argv) > 0 and sys.argv[0] and os.path.isfile(sys.argv[0]):
+        script_path = os.path.abspath(sys.argv[0])
+        
+        # Don't intercept if script is in site-packages or installed packages
+        # This prevents interference with tools like dbt, pip, etc.
+        if "site-packages" in script_path or "dist-packages" in script_path:
+            return
+        
+        # Don't intercept if script is in a virtual environment's bin/Scripts directory
+        if os.path.sep + "bin" + os.path.sep in script_path or os.path.sep + "Scripts" + os.path.sep in script_path:
+            return
+        
+        # Don't intercept if script is in Python installation directory
+        if sys.prefix in script_path or sys.base_prefix in script_path:
+            return
+        
         if should_use_uv():
             # Set environment variable to prevent infinite loop
             env = os.environ.copy()
