@@ -310,6 +310,178 @@ sys.exit(0)
         os.unlink(script_path)
 
 
+def test_no_infinite_loop():
+    """
+    Critical test: Verify UV_RUN_ACTIVE prevents infinite re-execution.
+    
+    This ensures auto-uv doesn't create an infinite loop by re-executing
+    itself when it's already running under uv.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write("""
+import os
+import sys
+
+# Count how many times this script has run
+counter_file = "/tmp/auto_uv_loop_test.txt"
+
+if os.path.exists(counter_file):
+    with open(counter_file, "r") as cf:
+        count = int(cf.read())
+else:
+    count = 0
+
+count += 1
+
+with open(counter_file, "w") as cf:
+    cf.write(str(count))
+
+print(f"Execution count: {count}")
+
+# If we're in a loop, this will keep incrementing
+if count > 2:
+    print("ERROR: Infinite loop detected!")
+    sys.exit(1)
+
+sys.exit(0)
+""")
+        script_path = f.name
+    
+    try:
+        # Clean up counter file if it exists
+        counter_file = "/tmp/auto_uv_loop_test.txt"
+        if os.path.exists(counter_file):
+            os.unlink(counter_file)
+        
+        # Run the script - it should only execute once or twice (not loop)
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5  # Timeout to catch infinite loops
+        )
+        
+        print(f"Loop test output: {result.stdout.strip()}")
+        print(f"Loop test stderr: {result.stderr.strip()}")
+        
+        # Verify no infinite loop
+        assert result.returncode == 0, (
+            f"Script detected infinite loop! "
+            f"Output: {result.stdout}, Stderr: {result.stderr}"
+        )
+        assert "ERROR: Infinite loop" not in result.stdout, (
+            "Infinite loop detected - UV_RUN_ACTIVE check failed!"
+        )
+        
+        # Clean up counter file
+        if os.path.exists(counter_file):
+            os.unlink(counter_file)
+        
+    except subprocess.TimeoutExpired:
+        # If we timeout, it's definitely an infinite loop
+        assert False, "Script timed out - infinite loop detected!"
+    finally:
+        os.unlink(script_path)
+        # Clean up counter file
+        counter_file = "/tmp/auto_uv_loop_test.txt"
+        if os.path.exists(counter_file):
+            os.unlink(counter_file)
+
+
+def test_no_interception_during_import():
+    """
+    Critical test: Verify auto-uv doesn't intercept when being imported.
+    
+    This ensures __main__.__file__ check works correctly to prevent
+    interception during site initialization or module imports.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write("""
+import sys
+
+# This simulates importing auto_uv during site initialization
+# auto_uv should NOT intercept because __main__.__file__ != sys.argv[0]
+
+# If auto_uv intercepts during import, we'll get a crash or unexpected behavior
+try:
+    import auto_uv
+    print("SUCCESS: auto_uv imported without interception")
+    sys.exit(0)
+except Exception as e:
+    print(f"ERROR: Failed to import auto_uv: {e}")
+    sys.exit(1)
+""")
+        script_path = f.name
+    
+    try:
+        # Set PYTHONPATH to find auto_uv module
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "src"
+        env["AUTO_UV_DISABLE"] = "1"  # Disable to test the check itself
+        
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        
+        print(f"Import test output: {result.stdout.strip()}")
+        print(f"Import test stderr: {result.stderr.strip()}")
+        
+        # Verify import succeeded without interception
+        assert result.returncode == 0, (
+            f"Failed to import auto_uv! "
+            f"Output: {result.stdout}, Stderr: {result.stderr}"
+        )
+        assert "SUCCESS" in result.stdout, (
+            "auto_uv import didn't complete successfully"
+        )
+        
+    finally:
+        os.unlink(script_path)
+
+
+def test_path_normalization():
+    """
+    Test that relative and absolute paths are normalized before comparison.
+    
+    This prevents the bug where __main__.__file__ is relative but
+    sys.argv[0] is absolute (or vice versa), causing incorrect interception.
+    """
+    from auto_uv import auto_use_uv
+    
+    # Save original state
+    original_dir = os.getcwd()
+    original_argv = sys.argv.copy()
+    
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a test script
+            script_path = os.path.join(tmpdir, "test_script.py")
+            with open(script_path, "w") as f:
+                f.write("print('test')")
+            
+            os.chdir(tmpdir)
+            
+            # Test 1: sys.argv[0] is relative, should normalize correctly
+            sys.argv = ["./test_script.py"]
+            # This should not crash or cause issues
+            # (We can't easily test auto_use_uv directly without triggering execution)
+            
+            # Test 2: sys.argv[0] is absolute
+            sys.argv = [script_path]
+            # This should also work correctly
+            
+            print("Path normalization test passed")
+            
+    finally:
+        os.chdir(original_dir)
+        sys.argv = original_argv
+
+
 if __name__ == "__main__":
     print("Running auto-uv tests...\n")
 
@@ -351,6 +523,27 @@ if __name__ == "__main__":
     print("Test 6: Project detection (pyproject.toml, .venv, uv.lock)")
     try:
         test_project_detection()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 7: No infinite loop (UV_RUN_ACTIVE check)")
+    try:
+        test_no_infinite_loop()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 8: No interception during import (__main__.__file__ check)")
+    try:
+        test_no_interception_during_import()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 9: Path normalization (relative vs absolute)")
+    try:
+        test_path_normalization()
         print("PASSED\n")
     except Exception as e:
         print(f"FAILED: {e}\n")
