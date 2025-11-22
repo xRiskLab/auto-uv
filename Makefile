@@ -23,7 +23,7 @@ dev-install: ## Install package with development dependencies
 	@echo "✅ Development environment ready!"
 
 test: ## Run tests
-	python tests/test_auto_uv.py
+	PYTHONPATH=src python tests/test_auto_uv.py
 	python example.py
 
 test-pytest: ## Run tests with pytest
