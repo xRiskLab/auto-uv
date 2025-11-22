@@ -21,9 +21,32 @@ def should_use_uv():
             check=True,
             timeout=2
         )
-        return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
+    
+    # Check if we're in a uv project (has pyproject.toml or .venv)
+    # This is important for the use case: "I'm in a project dir, run python script.py"
+    # We want to use uv run to pick up the project's environment
+    current_dir = os.getcwd()
+    
+    # Walk up the directory tree looking for project markers
+    check_dir = current_dir
+    max_depth = 10  # Don't search too far up
+    for _ in range(max_depth):
+        # Check for uv project markers
+        if (os.path.isfile(os.path.join(check_dir, "pyproject.toml")) or
+            os.path.isdir(os.path.join(check_dir, ".venv")) or
+            os.path.isfile(os.path.join(check_dir, "uv.lock"))):
+            return True
+        
+        # Move up one directory
+        parent = os.path.dirname(check_dir)
+        if parent == check_dir:  # Reached root
+            break
+        check_dir = parent
+    
+    # No project markers found, don't intercept
+    return False
 
 
 def auto_use_uv():
@@ -57,7 +80,10 @@ def auto_use_uv():
         import __main__
         if not hasattr(__main__, '__file__'):
             return
-        if __main__.__file__ != sys.argv[0]:
+        # Normalize both paths to absolute for comparison (handles relative vs absolute)
+        main_file = os.path.abspath(__main__.__file__) if __main__.__file__ else None
+        argv_file = os.path.abspath(sys.argv[0]) if sys.argv[0] else None
+        if main_file != argv_file:
             return
     except (ImportError, AttributeError):
         return
@@ -72,12 +98,25 @@ def auto_use_uv():
             return
         
         # Don't intercept if script is in a virtual environment's bin/Scripts directory
-        if os.path.sep + "bin" + os.path.sep in script_path or os.path.sep + "Scripts" + os.path.sep in script_path:
+        # Also check if path ends with /bin or /Scripts (e.g., /usr/bin, /usr/local/bin)
+        if (os.path.sep + "bin" + os.path.sep in script_path or 
+            os.path.sep + "Scripts" + os.path.sep in script_path or
+            script_path.endswith(os.path.sep + "bin") or
+            script_path.endswith(os.path.sep + "Scripts") or
+            script_path.startswith(os.path.sep + "bin" + os.path.sep) or
+            script_path.startswith(os.path.sep + "Scripts" + os.path.sep)):
             return
         
         # Don't intercept if script is in Python installation directory
         if sys.prefix in script_path or sys.base_prefix in script_path:
             return
+        
+        # Don't intercept if script is in system-wide directories
+        system_dirs = ["/usr/bin", "/usr/local/bin", "/opt/bin", "/bin", "/sbin", 
+                       "/usr/sbin", "/usr/local/sbin"]
+        for sys_dir in system_dirs:
+            if script_path.startswith(sys_dir + os.path.sep) or script_path == sys_dir:
+                return
         
         if should_use_uv():
             # Set environment variable to prevent infinite loop
@@ -89,12 +128,21 @@ def auto_use_uv():
             # Replace the current process with uv run (no subprocess, no exit)
             # This is cleaner and doesn't cause site initialization issues
             try:
-                # Find uv in PATH
+                # Find uv in PATH (handle both Unix and Windows)
                 uv_path = None
+                uv_names = ["uv"]
+                
+                # On Windows, also check for .exe, .cmd, .bat
+                if sys.platform == "win32":
+                    uv_names.extend(["uv.exe", "uv.cmd", "uv.bat"])
+                
                 for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-                    candidate = os.path.join(path_dir, "uv")
-                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                        uv_path = candidate
+                    for uv_name in uv_names:
+                        candidate = os.path.join(path_dir, uv_name)
+                        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                            uv_path = candidate
+                            break
+                    if uv_path:
                         break
                 
                 if uv_path:
