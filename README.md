@@ -33,13 +33,38 @@ AUTO_UV_DISABLE=1 python your_script.py
 
 ## How It Works
 
-When you install `auto-uv`, it uses the `hatch-autorun` plugin to automatically run code when Python starts. This code checks if:
+### The Magic Behind auto-uv
 
-1. You're running a script file (not interactive mode)
-2. `uv` is available on your system
-3. You're not already running under `uv run`
+When you install `auto-uv`, it uses the `hatch-autorun` plugin to install a `.pth` file in your Python's `site-packages` directory:
 
-If all conditions are met, it re-executes your script with `uv run`, giving you automatic dependency management.
+```
+site-packages/
+├── auto_uv.py                      # The main module
+├── hatch_autorun_auto_uv.pth       # The magic hook ✨
+└── auto_uv-0.1.2.dist-info/
+```
+
+The `.pth` file contains a single line that runs on Python startup:
+```python
+import os, sys;exec("__import__('auto_uv').auto_use_uv()")
+```
+
+This means **every time Python starts**, `auto-uv` checks if it should intercept:
+
+1. ✅ **You're running a script file** (not interactive mode or REPL)
+2. ✅ **You're in a project directory** (has `pyproject.toml`, `.venv`, or `uv.lock`)
+3. ✅ **`uv` is available** on your system
+4. ✅ **Not already running under `uv run`** (prevents infinite loops)
+5. ✅ **Not an installed package** (doesn't intercept `dbt`, `pytest`, etc.)
+
+If all conditions are met, it uses `os.execve()` to replace the current process with `uv run`, giving you automatic dependency management.
+
+### Why This Works
+
+- **Seamless**: No need to modify your scripts or remember to use `uv run`
+- **Safe**: Extensive checks prevent interference with system tools
+- **Smart**: Detects project directories by walking up the tree
+- **Fast**: Uses process replacement (`execve`), not subprocess spawning
 
 ## Requirements
 
