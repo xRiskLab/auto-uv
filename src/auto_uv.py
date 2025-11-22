@@ -35,8 +35,9 @@ def auto_use_uv():
     2. UV_RUN_ACTIVE environment variable is not set
     3. uv is available in the system
     4. We're running a user script (not a package/tool script)
+    5. We're in the main execution context (not during import/site initialization)
     
-    If all conditions are met, it re-executes the script with 'uv run'.
+    If all conditions are met, it replaces the current process with 'uv run'.
     
     Note: This function intelligently skips interception for:
     - Installed packages (site-packages, dist-packages)
@@ -44,8 +45,25 @@ def auto_use_uv():
     - Python installation scripts
     This prevents interference with tools like dbt, pytest, pip, etc.
     """
+    # CRITICAL: Don't intercept during site initialization or imports
+    # Only intercept when __name__ == '__main__' in the actual script being run
+    # We check if sys.argv[0] matches the file being executed
+    if not sys.argv or not sys.argv[0]:
+        return
+    
+    # Don't intercept if we're being imported (not the main script)
+    # This prevents interception during site.py initialization
+    try:
+        import __main__
+        if not hasattr(__main__, '__file__'):
+            return
+        if __main__.__file__ != sys.argv[0]:
+            return
+    except (ImportError, AttributeError):
+        return
+    
     # Only intercept if running a script file
-    if len(sys.argv) > 0 and sys.argv[0] and os.path.isfile(sys.argv[0]):
+    if os.path.isfile(sys.argv[0]):
         script_path = os.path.abspath(sys.argv[0])
         
         # Don't intercept if script is in site-packages or installed packages
@@ -63,18 +81,30 @@ def auto_use_uv():
         
         if should_use_uv():
             # Set environment variable to prevent infinite loop
-            env = os.environ.copy()
-            env["UV_RUN_ACTIVE"] = "1"
+            os.environ["UV_RUN_ACTIVE"] = "1"
             
             # Build the uv run command
             cmd = ["uv", "run"] + sys.argv
             
-            # Execute with uv run and exit
+            # Replace the current process with uv run (no subprocess, no exit)
+            # This is cleaner and doesn't cause site initialization issues
             try:
-                result = subprocess.run(cmd, env=env)
-                sys.exit(result.returncode)
+                # Find uv in PATH
+                uv_path = None
+                for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+                    candidate = os.path.join(path_dir, "uv")
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        uv_path = candidate
+                        break
+                
+                if uv_path:
+                    # Use os.execve to replace the current process
+                    os.execve(uv_path, cmd, os.environ)
+                else:
+                    # Fallback: uv not found, continue normally
+                    return
             except Exception as e:
-                # If uv run fails, continue with normal execution
-                print(f"Warning: Failed to run with uv: {e}", file=sys.stderr)
+                # If exec fails, continue with normal execution
+                print(f"Warning: Failed to exec uv: {e}", file=sys.stderr)
                 return
 
