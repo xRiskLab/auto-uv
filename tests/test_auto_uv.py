@@ -444,10 +444,75 @@ except Exception as e:
         os.unlink(script_path)
 
 
+def test_script_path_detection():
+    """
+    Test that auto-uv detects projects based on script location, not just CWD.
+
+    This covers the use case: "cd /some/dir && python /path/to/project/script.py"
+    auto-uv should detect the project from the script's directory, not from CWD.
+    """
+    from auto_uv import should_use_uv, _find_project_root
+
+    # Save original directory and environment
+    original_dir = os.getcwd()
+    original_env = os.environ.copy()
+
+    try:
+        # Temporarily remove AUTO_UV_DISABLE to test project detection
+        if "AUTO_UV_DISABLE" in os.environ:
+            del os.environ["AUTO_UV_DISABLE"]
+        if "UV_RUN_ACTIVE" in os.environ:
+            del os.environ["UV_RUN_ACTIVE"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a project directory with pyproject.toml
+            project_dir = os.path.join(tmpdir, "my_project")
+            os.makedirs(project_dir)
+            with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+                f.write("[project]\nname = 'test'\n")
+
+            # Create a script inside the project
+            script_path = os.path.join(project_dir, "my_script.py")
+            with open(script_path, "w") as f:
+                f.write("print('hello')")
+
+            # Create a completely unrelated directory (no project markers)
+            unrelated_dir = os.path.join(tmpdir, "unrelated")
+            os.makedirs(unrelated_dir)
+
+            # Test 1: From unrelated dir, should_use_uv() without script_path returns False
+            os.chdir(unrelated_dir)
+            result = should_use_uv()
+            print(f"From unrelated dir, no script_path: should_use_uv = {result}")
+            assert result is False, "Should NOT detect project when CWD has no markers and no script_path"
+
+            # Test 2: From unrelated dir, should_use_uv(script_path) returns True
+            result = should_use_uv(script_path)
+            print(f"From unrelated dir, with script_path: should_use_uv = {result}")
+            assert result is True, "Should detect project from script's directory even when CWD has no markers"
+
+            # Test 3: _find_project_root from script directory finds the project
+            script_dir = os.path.dirname(script_path)
+            project_root = _find_project_root(script_dir)
+            print(f"_find_project_root from script dir: {project_root}")
+            assert project_root == project_dir, f"Expected {project_dir}, got {project_root}"
+
+            # Test 4: _find_project_root from unrelated dir returns None
+            project_root = _find_project_root(unrelated_dir)
+            print(f"_find_project_root from unrelated dir: {project_root}")
+            assert project_root is None, "Should not find project root from unrelated directory"
+
+    finally:
+        # Restore original directory and environment
+        os.chdir(original_dir)
+        os.environ.clear()
+        os.environ.update(original_env)
+
+
 def test_path_normalization():
     """
     Test that relative and absolute paths are normalized before comparison.
-    
+
     This prevents the bug where __main__.__file__ is relative but
     sys.argv[0] is absolute (or vice versa), causing incorrect interception.
     """
@@ -544,6 +609,13 @@ if __name__ == "__main__":
     print("Test 9: Path normalization (relative vs absolute)")
     try:
         test_path_normalization()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 10: Script path detection (detect project from script location)")
+    try:
+        test_script_path_detection()
         print("PASSED\n")
     except Exception as e:
         print(f"FAILED: {e}\n")
