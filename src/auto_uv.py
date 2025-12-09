@@ -3,16 +3,39 @@ import os
 import subprocess
 
 
-def should_use_uv():
+def _find_project_root(start_dir, max_depth=10):
+    """
+    Walk up from start_dir looking for uv project markers.
+
+    Returns the project root directory if found, None otherwise.
+    """
+    check_dir = os.path.abspath(start_dir)
+    for _ in range(max_depth):
+        # Check for uv project markers
+        if (os.path.isfile(os.path.join(check_dir, "pyproject.toml")) or
+            os.path.isdir(os.path.join(check_dir, ".venv")) or
+            os.path.isfile(os.path.join(check_dir, "uv.lock"))):
+            return check_dir
+
+        # Move up one directory
+        parent = os.path.dirname(check_dir)
+        if parent == check_dir:  # Reached root
+            break
+        check_dir = parent
+
+    return None
+
+
+def should_use_uv(script_path=None):
     """Check if we should intercept and use uv run."""
     # Don't intercept if we're already running under uv
     if os.environ.get("UV_RUN_ACTIVE"):
         return False
-    
+
     # Don't intercept if AUTO_UV is explicitly disabled
     if os.environ.get("AUTO_UV_DISABLE", "").lower() in ("1", "true", "yes"):
         return False
-    
+
     # Check if uv is available
     try:
         subprocess.run(
@@ -23,30 +46,21 @@ def should_use_uv():
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
-    
-    # Check if we're in a uv project (has pyproject.toml or .venv)
-    # This is important for the use case: "I'm in a project dir, run python script.py"
-    # We want to use uv run to pick up the project's environment
-    current_dir = os.getcwd()
-    
-    # Walk up the directory tree looking for project markers
-    check_dir = current_dir
-    max_depth = 10  # Don't search too far up
-    for _ in range(max_depth):
-        # Check for uv project markers
-        if (os.path.isfile(os.path.join(check_dir, "pyproject.toml")) or
-            os.path.isdir(os.path.join(check_dir, ".venv")) or
-            os.path.isfile(os.path.join(check_dir, "uv.lock"))):
-            return True
-        
-        # Move up one directory
-        parent = os.path.dirname(check_dir)
-        if parent == check_dir:  # Reached root
-            break
-        check_dir = parent
-    
-    # No project markers found, don't intercept
-    return False
+
+    # Check if we're in a uv project (has pyproject.toml or .venv or uv.lock)
+    # First, try to find project root from the script's directory (if provided)
+    # This handles the case: "cd /some/dir && python /path/to/project/script.py"
+    # Then fall back to current working directory for backwards compatibility
+    project_root = None
+
+    if script_path:
+        script_dir = os.path.dirname(os.path.abspath(script_path))
+        project_root = _find_project_root(script_dir)
+
+    if not project_root:
+        project_root = _find_project_root(os.getcwd())
+
+    return project_root is not None
 
 
 def auto_use_uv():
@@ -118,7 +132,7 @@ def auto_use_uv():
             if script_path.startswith(sys_dir + os.path.sep) or script_path == sys_dir:
                 return
         
-        if should_use_uv():
+        if should_use_uv(script_path):
             # Set environment variable to prevent infinite loop
             os.environ["UV_RUN_ACTIVE"] = "1"
             
