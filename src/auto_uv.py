@@ -128,14 +128,12 @@ def auto_use_uv():
             # Replace the current process with uv run (no subprocess, no exit)
             # This is cleaner and doesn't cause site initialization issues
             try:
-                # Find uv in PATH (handle both Unix and Windows)
+                # Find uv in PATH (handle both Unix and Windows).
+                # Windows suffixes are harmless on Unix (no such files in PATH),
+                # so list them unconditionally to avoid a platform-dead branch.
                 uv_path = None
-                uv_names = ["uv"]
-                
-                # On Windows, also check for .exe, .cmd, .bat
-                if sys.platform == "win32":
-                    uv_names.extend(["uv.exe", "uv.cmd", "uv.bat"])
-                
+                uv_names = ["uv", "uv.exe", "uv.cmd", "uv.bat"]
+
                 for path_dir in os.environ.get("PATH", "").split(os.pathsep):
                     for uv_name in uv_names:
                         candidate = os.path.join(path_dir, uv_name)
