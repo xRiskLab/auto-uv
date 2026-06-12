@@ -482,6 +482,165 @@ def test_path_normalization():
         sys.argv = original_argv
 
 
+def test_should_intercept_matrix():
+    """Unit-test the pure interception decision across every invocation shape.
+
+    This locks the site-init contract: only a real `python <user_script.py>`
+    inside a uv project is intercepted; REPL / -c / -m / non-files / installed
+    or system scripts / disabled env / no-uv / no-project are all left alone.
+    """
+    import auto_uv as m
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # A real user script inside a real uv project.
+        proj = os.path.join(tmp, "proj")
+        os.makedirs(proj)
+        with open(os.path.join(proj, "pyproject.toml"), "w") as f:
+            f.write("[project]\nname = 'p'\nversion = '0'\n")
+        app = os.path.join(proj, "app.py")
+        with open(app, "w") as f:
+            f.write("print('hi')\n")
+
+        # A script that lives under a fake site-packages (installed tool).
+        sp = os.path.join(tmp, "env", "site-packages")
+        os.makedirs(sp)
+        installed = os.path.join(sp, "dbt_cli.py")
+        with open(installed, "w") as f:
+            f.write("print('tool')\n")
+
+        # Pretend uv is installed and we are inside a project, deterministically.
+        real_uv = m._uv_available
+        m._uv_available = lambda: True
+        try:
+            def decide(argv, environ=None):
+                return m._should_intercept(
+                    argv=argv, cwd=proj, environ=environ or {}
+                )
+
+            # Positive: real script file in a project -> intercept.
+            assert decide([app]) is True
+            assert decide([app, "--flag", "x"]) is True
+
+            # Negatives that must never intercept.
+            assert decide([""]) is False          # REPL
+            assert decide(["-c"]) is False         # python -c
+            assert decide(["-m"]) is False         # python -m mod
+            assert decide([]) is False             # no argv
+            assert decide([os.path.join(tmp, "missing.py")]) is False  # not a file
+            assert decide([installed]) is False    # installed (site-packages)
+
+            # Env opt-outs.
+            assert decide([app], {"UV_RUN_ACTIVE": "1"}) is False
+            assert decide([app], {"AUTO_UV_DISABLE": "1"}) is False
+            assert decide([app], {"AUTO_UV_DISABLE": "true"}) is False
+
+            # uv not available -> no intercept.
+            m._uv_available = lambda: False
+            assert decide([app]) is False
+            m._uv_available = lambda: True
+
+            # Not in a uv project -> no intercept.
+            assert m._should_intercept(argv=[app], cwd=tmp, environ={}) is False
+        finally:
+            m._uv_available = real_uv
+
+    print("Interception matrix: all cases correct")
+
+
+def test_installed_pth_actually_redirects():
+    """Integration regression test for the v0.1.2 no-op bug.
+
+    Builds the wheel, installs it (with its hatch-autorun .pth) into an isolated
+    venv, and asserts the hook ACTUALLY redirects `python app.py` to `uv run`
+    inside a uv project -- while leaving `python -c` and AUTO_UV_DISABLE alone.
+
+    Skipped when uv is unavailable (the only thing that can drive this path).
+    """
+    import shutil
+
+    if shutil.which("uv") is None:
+        try:
+            import pytest
+
+            pytest.skip("uv not available")
+        except ImportError:
+            print("SKIP: uv not available")
+            return
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def run(cmd, **kw):
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=True, timeout=180, **kw
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dist = os.path.join(tmp, "dist")
+        run(["uv", "build", "--wheel", "--out-dir", dist], cwd=project_root)
+        wheel = os.path.join(dist, next(
+            f for f in os.listdir(dist) if f.endswith(".whl")
+        ))
+
+        venv = os.path.join(tmp, "venv")
+        run(["uv", "venv", venv])
+        py = os.path.join(venv, "bin", "python")
+        if not os.path.exists(py):  # Windows
+            py = os.path.join(venv, "Scripts", "python.exe")
+        run(["uv", "pip", "install", "--python", py, wheel])
+
+        # Confirm the autorun .pth hook was actually installed.
+        pth_found = any(
+            "auto_uv" in fname
+            for root, _, files in os.walk(venv)
+            for fname in files
+            if fname.endswith(".pth")
+        )
+        assert pth_found, "hatch-autorun .pth hook was not installed"
+
+        proj = os.path.join(tmp, "proj")
+        os.makedirs(proj)
+        with open(os.path.join(proj, "pyproject.toml"), "w") as f:
+            f.write('[project]\nname = "probe"\nversion = "0"\n'
+                    'requires-python = ">=3.9"\n')
+        with open(os.path.join(proj, "app.py"), "w") as f:
+            f.write('import os\n'
+                    'print("UV_ACTIVE=" + str(os.environ.get("UV_RUN_ACTIVE")))\n')
+
+        env = os.environ.copy()
+        env.pop("UV_RUN_ACTIVE", None)
+        env.pop("AUTO_UV_DISABLE", None)
+
+        # 1) Real script in a project -> MUST be redirected under `uv run`.
+        r = subprocess.run(
+            [py, "app.py"], cwd=proj, capture_output=True, text=True,
+            env=env, timeout=180,
+        )
+        assert "UV_ACTIVE=1" in r.stdout, (
+            f"installed .pth failed to redirect script!\n"
+            f"stdout={r.stdout!r}\nstderr={r.stderr!r}"
+        )
+
+        # 2) python -c -> MUST NOT be redirected.
+        r2 = subprocess.run(
+            [py, "-c",
+             "import os;print('CMINUS=' + str(os.environ.get('UV_RUN_ACTIVE')))"],
+            cwd=proj, capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert "CMINUS=None" in r2.stdout, f"-c wrongly intercepted: {r2.stdout!r}"
+
+        # 3) AUTO_UV_DISABLE=1 -> MUST NOT be redirected.
+        env_off = dict(env, AUTO_UV_DISABLE="1")
+        r3 = subprocess.run(
+            [py, "app.py"], cwd=proj, capture_output=True, text=True,
+            env=env_off, timeout=120,
+        )
+        assert "UV_ACTIVE=None" in r3.stdout, (
+            f"AUTO_UV_DISABLE ignored: {r3.stdout!r}"
+        )
+
+    print("Installed .pth redirect: confirmed")
+
+
 if __name__ == "__main__":
     print("Running auto-uv tests...\n")
 
@@ -544,6 +703,20 @@ if __name__ == "__main__":
     print("Test 9: Path normalization (relative vs absolute)")
     try:
         test_path_normalization()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 10: Interception decision matrix (_should_intercept)")
+    try:
+        test_should_intercept_matrix()
+        print("PASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}\n")
+
+    print("Test 11: Installed .pth actually redirects (v0.1.2 no-op regression)")
+    try:
+        test_installed_pth_actually_redirects()
         print("PASSED\n")
     except Exception as e:
         print(f"FAILED: {e}\n")

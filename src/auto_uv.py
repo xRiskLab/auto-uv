@@ -1,156 +1,176 @@
-import sys
+"""auto-uv: transparently re-run ``python script.py`` as ``uv run`` in a project.
+
+The package installs a ``hatch-autorun`` ``.pth`` file that calls
+:func:`auto_use_uv` during interpreter site-initialization. When the interpreter
+is starting up to run a *user script* inside a uv project, we re-exec the process
+as ``uv run <script>`` so the script picks up the project's environment.
+
+Detection runs at site-init time, where ``__main__.__file__`` is not set yet but
+``sys.argv[0]`` already holds the script path (REPL -> ``''``, ``-c`` -> ``'-c'``,
+``-m`` -> ``'-m'``). We therefore key off ``sys.argv[0]`` and never raise into
+site initialization.
+"""
+
 import os
 import subprocess
+import sys
+
+# Project markers that mean "this directory tree is a uv project".
+_PROJECT_MARKERS = ("pyproject.toml", "uv.lock")
+_MAX_PARENT_DEPTH = 10
+
+# Directories whose scripts must never be hijacked (system / distro Python).
+_SYSTEM_DIRS = (
+    "/usr/bin", "/usr/local/bin", "/opt/bin", "/bin", "/sbin",
+    "/usr/sbin", "/usr/local/sbin",
+)
 
 
-def should_use_uv():
-    """Check if we should intercept and use uv run."""
-    # Don't intercept if we're already running under uv
-    if os.environ.get("UV_RUN_ACTIVE"):
-        return False
-    
-    # Don't intercept if AUTO_UV is explicitly disabled
-    if os.environ.get("AUTO_UV_DISABLE", "").lower() in ("1", "true", "yes"):
-        return False
-    
-    # Check if uv is available
+def _env_disables(environ):
+    """True if the environment opts out of interception."""
+    if environ.get("UV_RUN_ACTIVE"):
+        return True  # already inside `uv run` -> never recurse
+    return environ.get("AUTO_UV_DISABLE", "").lower() in ("1", "true", "yes")
+
+
+def _uv_available():
+    """True if a working ``uv`` is on PATH."""
     try:
         subprocess.run(
-            ["uv", "--version"],
-            capture_output=True,
-            check=True,
-            timeout=2
+            ["uv", "--version"], capture_output=True, check=True, timeout=2
         )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return True
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ):
         return False
-    
-    # Check if we're in a uv project (has pyproject.toml or .venv)
-    # This is important for the use case: "I'm in a project dir, run python script.py"
-    # We want to use uv run to pick up the project's environment
-    current_dir = os.getcwd()
-    
-    # Walk up the directory tree looking for project markers
-    check_dir = current_dir
-    max_depth = 10  # Don't search too far up
-    for _ in range(max_depth):
-        # Check for uv project markers
-        if (os.path.isfile(os.path.join(check_dir, "pyproject.toml")) or
-            os.path.isdir(os.path.join(check_dir, ".venv")) or
-            os.path.isfile(os.path.join(check_dir, "uv.lock"))):
+
+
+def _in_uv_project(cwd):
+    """True if ``cwd`` or any parent (up to a bounded depth) is a uv project."""
+    check_dir = cwd
+    for _ in range(_MAX_PARENT_DEPTH):
+        for marker in _PROJECT_MARKERS:
+            if os.path.exists(os.path.join(check_dir, marker)):
+                return True
+        if os.path.isdir(os.path.join(check_dir, ".venv")):
             return True
-        
-        # Move up one directory
         parent = os.path.dirname(check_dir)
-        if parent == check_dir:  # Reached root
+        if parent == check_dir:  # reached filesystem root
             break
         check_dir = parent
-    
-    # No project markers found, don't intercept
     return False
 
 
-def auto_use_uv():
+def should_use_uv():
+    """Back-compatible helper: env + uv availability + project detection (cwd)."""
+    if _env_disables(os.environ):
+        return False
+    if not _uv_available():
+        return False
+    return _in_uv_project(os.getcwd())
+
+
+def _script_target(argv):
+    """Return the abs path of the user script iff ``argv`` is ``python <file.py>``.
+
+    Returns ``None`` for the REPL (``argv[0] == ''``), ``python -c`` (``'-c'``),
+    ``python -m mod`` (``'-m'`` at site-init time), stdin, or any ``argv[0]`` that
+    is not an existing regular file.
     """
-    Automatically re-execute the current script with 'uv run' if conditions are met.
-    
-    This function checks if:
-    1. We're not already running under uv
-    2. UV_RUN_ACTIVE environment variable is not set
-    3. uv is available in the system
-    4. We're running a user script (not a package/tool script)
-    5. We're in the main execution context (not during import/site initialization)
-    
-    If all conditions are met, it replaces the current process with 'uv run'.
-    
-    Note: This function intelligently skips interception for:
-    - Installed packages (site-packages, dist-packages)
-    - Virtual environment executables (bin/, Scripts/)
-    - Python installation scripts
-    This prevents interference with tools like dbt, pytest, pip, etc.
-    """
-    # CRITICAL: Don't intercept during site initialization or imports
-    # Only intercept when __name__ == '__main__' in the actual script being run
-    # We check if sys.argv[0] matches the file being executed
-    if not sys.argv or not sys.argv[0]:
-        return
-    
-    # Don't intercept if we're being imported (not the main script)
-    # This prevents interception during site.py initialization
+    if not argv:
+        return None
+    arg0 = argv[0]
+    if not arg0 or arg0 in ("-c", "-m"):
+        return None
     try:
-        import __main__
-        if not hasattr(__main__, '__file__'):
+        if not os.path.isfile(arg0):
+            return None
+        return os.path.abspath(arg0)
+    except (OSError, ValueError):
+        return None
+
+
+def _is_excluded_script(script_path):
+    """True if ``script_path`` is an installed tool / venv / system / stdlib script.
+
+    Prevents hijacking console entrypoints (dbt, pip, pytest, ...) and anything
+    living inside ``site-packages``, a venv ``bin``/``Scripts`` dir, the Python
+    installation, or a system bin directory.
+    """
+    sep = os.path.sep
+    if "site-packages" in script_path or "dist-packages" in script_path:
+        return True
+    if (
+        sep + "bin" + sep in script_path
+        or sep + "Scripts" + sep in script_path
+        or script_path.endswith(sep + "bin")
+        or script_path.endswith(sep + "Scripts")
+    ):
+        return True
+    for prefix in (getattr(sys, "prefix", ""), getattr(sys, "base_prefix", "")):
+        if prefix and script_path.startswith(prefix + sep):
+            return True
+    for sys_dir in _SYSTEM_DIRS:
+        if script_path == sys_dir or script_path.startswith(sys_dir + sep):
+            return True
+    return False
+
+
+def _should_intercept(argv=None, cwd=None, environ=None):
+    """Pure decision: should this interpreter startup be redirected to ``uv run``?
+
+    Arguments default to the live process state but are injectable for testing.
+    """
+    argv = sys.argv if argv is None else argv
+    cwd = os.getcwd() if cwd is None else cwd
+    environ = os.environ if environ is None else environ
+
+    if _env_disables(environ):
+        return False
+    script = _script_target(argv)
+    if script is None:
+        return False
+    if _is_excluded_script(script):
+        return False
+    if not _uv_available():
+        return False
+    return _in_uv_project(cwd)
+
+
+def _find_uv():
+    """Locate the ``uv`` executable on PATH (handles Windows suffixes)."""
+    names = ("uv", "uv.exe", "uv.cmd", "uv.bat")
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        for name in names:
+            candidate = os.path.join(path_dir, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def auto_use_uv():
+    """Re-exec ``python <script.py>`` as ``uv run <script.py>`` inside a uv project.
+
+    Invoked from the ``.pth`` autorun hook during site-initialization, so the
+    entire body is guarded: it must never raise into interpreter startup.
+    """
+    try:
+        if not _should_intercept():
             return
-        # Normalize both paths to absolute for comparison (handles relative vs absolute)
-        main_file = os.path.abspath(__main__.__file__) if __main__.__file__ else None
-        argv_file = os.path.abspath(sys.argv[0]) if sys.argv[0] else None
-        if main_file != argv_file:
+        uv_path = _find_uv()
+        if uv_path is None:
             return
-    except (ImportError, AttributeError):
+        # Guard against infinite re-execution; the child sees UV_RUN_ACTIVE=1.
+        os.environ["UV_RUN_ACTIVE"] = "1"
+        cmd = [uv_path, "run", *sys.argv]
+        os.execve(uv_path, cmd, os.environ)
+    except Exception as exc:  # never crash interpreter startup
+        try:
+            sys.stderr.write(f"auto-uv: skipped interception ({exc})\n")
+        except Exception:
+            pass
         return
-    
-    # Only intercept if running a script file
-    if os.path.isfile(sys.argv[0]):
-        script_path = os.path.abspath(sys.argv[0])
-        
-        # Don't intercept if script is in site-packages or installed packages
-        # This prevents interference with tools like dbt, pip, etc.
-        if "site-packages" in script_path or "dist-packages" in script_path:
-            return
-        
-        # Don't intercept if script is in a virtual environment's bin/Scripts directory
-        # Also check if path ends with /bin or /Scripts (e.g., /usr/bin, /usr/local/bin)
-        if (os.path.sep + "bin" + os.path.sep in script_path or 
-            os.path.sep + "Scripts" + os.path.sep in script_path or
-            script_path.endswith(os.path.sep + "bin") or
-            script_path.endswith(os.path.sep + "Scripts") or
-            script_path.startswith(os.path.sep + "bin" + os.path.sep) or
-            script_path.startswith(os.path.sep + "Scripts" + os.path.sep)):
-            return
-        
-        # Don't intercept if script is in Python installation directory
-        if sys.prefix in script_path or sys.base_prefix in script_path:
-            return
-        
-        # Don't intercept if script is in system-wide directories
-        system_dirs = ["/usr/bin", "/usr/local/bin", "/opt/bin", "/bin", "/sbin", 
-                       "/usr/sbin", "/usr/local/sbin"]
-        for sys_dir in system_dirs:
-            if script_path.startswith(sys_dir + os.path.sep) or script_path == sys_dir:
-                return
-        
-        if should_use_uv():
-            # Set environment variable to prevent infinite loop
-            os.environ["UV_RUN_ACTIVE"] = "1"
-            
-            # Build the uv run command
-            cmd = ["uv", "run"] + sys.argv
-            
-            # Replace the current process with uv run (no subprocess, no exit)
-            # This is cleaner and doesn't cause site initialization issues
-            try:
-                # Find uv in PATH (handle both Unix and Windows).
-                # Windows suffixes are harmless on Unix (no such files in PATH),
-                # so list them unconditionally to avoid a platform-dead branch.
-                uv_path = None
-                uv_names = ["uv", "uv.exe", "uv.cmd", "uv.bat"]
-
-                for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-                    for uv_name in uv_names:
-                        candidate = os.path.join(path_dir, uv_name)
-                        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                            uv_path = candidate
-                            break
-                    if uv_path:
-                        break
-                
-                if uv_path:
-                    # Use os.execve to replace the current process
-                    os.execve(uv_path, cmd, os.environ)
-                else:
-                    # Fallback: uv not found, continue normally
-                    return
-            except Exception as e:
-                # If exec fails, continue with normal execution
-                print(f"Warning: Failed to exec uv: {e}", file=sys.stderr)
-                return
-

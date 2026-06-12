@@ -1,3 +1,34 @@
+# Unreleased - Autorun hook actually fires again
+
+## Critical Fix
+
+### Installed `.pth` hook was a silent no-op (v0.1.2 regression)
+- **Problem**: The v0.1.1 fix guarded interception with `__main__.__file__ ==
+  sys.argv[0]`. But the hatch-autorun `.pth` runs during *site initialization*,
+  where `__main__.__file__` is still `None` — so the guard always returned early
+  and `python script.py` was **never** redirected to `uv run` when installed
+  normally. Interception only happened via an explicit in-script call.
+- **Solution**: Key the decision off `sys.argv[0]` (reliably set at site-init):
+  intercept only when `argv[0]` is an existing user `.py` file — naturally
+  skipping the REPL (`''`), `python -c` (`-c`), and `python -m` (`-m`). All
+  prior guards (site-packages / venv `bin` / `sys.prefix` / system dirs /
+  `UV_RUN_ACTIVE` / `AUTO_UV_DISABLE`) are preserved. The whole hook body is
+  wrapped so it can never raise into interpreter startup.
+- **Refactor**: Interception logic extracted into a pure, injectable
+  `_should_intercept(argv, cwd, environ)` for direct unit testing.
+- **Impact**: `python script.py` inside a uv project is redirected to `uv run`
+  again. ⚠️ This restores active interception — set `AUTO_UV_DISABLE=1` to opt
+  out.
+
+## Tests
+- Added `test_should_intercept_matrix`: hermetic unit coverage of every
+  invocation shape (script, REPL, `-c`, `-m`, missing file, installed/system
+  script, env opt-outs, no-uv, no-project).
+- Added `test_installed_pth_actually_redirects`: integration test that builds
+  the wheel, installs it (with the `.pth`) into an isolated venv, and asserts
+  the hook really redirects `python app.py` while leaving `-c` and
+  `AUTO_UV_DISABLE` alone — the regression guard the suite previously lacked.
+
 # v0.1.2 - Critical Bug Fixes and Comprehensive Edge Case Coverage
 
 ## Critical Fixes
