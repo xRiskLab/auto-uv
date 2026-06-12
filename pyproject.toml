@@ -1,6 +1,6 @@
 [project]
 name = "auto-uv"
-version = "0.1.2"
+version = "0.2.0"
 description = "Automatically use 'uv run' when executing Python scripts"
 keywords = ['uv', 'package manager', 'automation', 'python', 'development']
 authors = [

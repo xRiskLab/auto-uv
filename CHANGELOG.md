@@ -1,4 +1,4 @@
-# Unreleased - Autorun hook actually fires again
+# v0.2.0 - Autorun hook actually fires again
 
 ## Critical Fix
 
